@@ -21,6 +21,7 @@ File myFile;
 RTC_DS3231 rtc;
 char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
 
+
 //------------------------------------------------------------------------------
 // Accelerometer module
 MPU6050 mpu(0x69);
@@ -240,6 +241,7 @@ void loop() {
         myFile.print(aaReal.y);
         myFile.print("\t");
         myFile.println(aaReal.z);
+        myFile.flush();
       } else {
         // if the file didn't open, print an error:
         Serial.println("error opening test.txt");
