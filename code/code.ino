@@ -15,12 +15,13 @@
 #define SD_CS_PIN SS
 SdFat SD;
 File myFile;
+int loop_output[30][3];
+int i = 0;
+int k = 0;
 
 //------------------------------------------------------------------------------
 // Time module
 RTC_DS3231 rtc;
-char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
-
 
 //------------------------------------------------------------------------------
 // Accelerometer module
@@ -73,13 +74,13 @@ void setup() {
   //------------------------------------------------------------------------------
   // SD module
   // initialize SD card
-  Serial.print("Initializing SD card...");
+  Serial.print(F("Initializing SD card..."));
 
   if (!SD.begin(SD_CS_PIN)) {
     Serial.println("initialization failed!");
     return;
   }
-  Serial.println("initialization done.");
+  Serial.println(F("initialization done."));
 
   // open the file
   myFile = SD.open("testing.txt", FILE_WRITE);
@@ -87,13 +88,13 @@ void setup() {
   //------------------------------------------------------------------------------
   // Time module
   if (! rtc.begin()) {
-    Serial.println("Couldn't find RTC");
+    Serial.println(F("Couldn't find RTC"));
     Serial.flush();
     while (1) delay(10);
   }
 
   if (rtc.lostPower()) {
-    Serial.println("RTC lost power, let's set the time!");
+    Serial.println(F("RTC lost power, let's set the time!"));
     // When time needs to be set on a new device, or after a power loss, the
     // following line sets the RTC to the date & time this sketch was compiled
     rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
@@ -106,9 +107,7 @@ void setup() {
   myFile.print(now.month(), DEC);
   myFile.print('/');
   myFile.print(now.day(), DEC);
-  myFile.print(" (");
-  myFile.print(daysOfTheWeek[now.dayOfTheWeek()]);
-  myFile.print(") ");
+  myFile.print(" , ");
   myFile.print(now.hour(), DEC);
   myFile.print(':');
   myFile.print(now.minute(), DEC);
@@ -128,13 +127,7 @@ void setup() {
   // verify connection
   Serial.println(F("Testing device connections..."));
   Serial.println(mpu.testConnection() ? F("MPU6050 connection successful") : F("MPU6050 connection failed"));
-  /*
-  // wait for ready
-  Serial.println(F("\nSend any character to begin DMP programming and demo: "));
-  while (Serial.available() && Serial.read()); // empty buffer
-  while (!Serial.available());                 // wait for data
-  while (Serial.available() && Serial.read()); // empty buffer again
-  */
+  
   // load and configure the DMP
   Serial.println(F("Initializing DMP..."));
   devStatus = mpu.dmpInitialize();
@@ -176,25 +169,13 @@ void setup() {
     Serial.print(devStatus);
     Serial.println(F(")"));
   }
-
-  // configure LED for output
-  pinMode(LED_PIN, OUTPUT);
 }
 
 void loop() {
   // if programming failed, don't try to do anything
   if (!dmpReady) return;
   // read a packet from FIFO
-  if (mpu.dmpGetCurrentFIFOPacket(fifoBuffer)) { // Get the Latest packet 
-    // current time
-    DateTime now = rtc.now();
-    myFile.print(now.hour(), DEC);
-    myFile.print(':');
-    myFile.print(now.minute(), DEC);
-    myFile.print(':');
-    myFile.print(now.second(), DEC);
-    myFile.print("\t");
-    
+  if (mpu.dmpGetCurrentFIFOPacket(fifoBuffer)) { // Get the Latest packet
     #ifdef OUTPUT_READABLE_EULER
       // display Euler angles in degrees
       mpu.dmpGetQuaternion(&q, fifoBuffer);
@@ -206,19 +187,6 @@ void loop() {
       Serial.print("\t");
       Serial.print(euler[2] * 180/M_PI);
       Serial.print("\t");
-
-      //Write to file
-      if (myFile) {
-        myFile.print(euler[0] * 180/M_PI);
-        myFile.print("\t");
-        myFile.print(euler[1] * 180/M_PI);
-        myFile.print("\t");
-        myFile.println(euler[2] * 180/M_PI);
-        myFile.print("\t");
-      } else {
-        // if the file didn't open, print an error:
-        Serial.println("error opening test.txt");
-      }
     #endif
 
     #ifdef OUTPUT_READABLE_REALACCEL
@@ -227,24 +195,47 @@ void loop() {
       mpu.dmpGetAccel(&aa, fifoBuffer);
       mpu.dmpGetGravity(&gravity, &q);
       mpu.dmpGetLinearAccel(&aaReal, &aa, &gravity);
-      Serial.print("areal\t");
-      Serial.print(aaReal.x);
-      Serial.print("\t");
-      Serial.print(aaReal.y);
-      Serial.print("\t");
-      Serial.println(aaReal.z);
+//      Serial.print("areal\t");
+//      Serial.print(aaReal.x);
+//      Serial.print("\t");
+//      Serial.print(aaReal.y);
+//      Serial.print("\t");
+//      Serial.println(aaReal.z);
 
-      //Write to file
-      if (myFile) {
-        myFile.print(aaReal.x);
-        myFile.print("\t");
-        myFile.print(aaReal.y);
-        myFile.print("\t");
-        myFile.println(aaReal.z);
+      loop_output[i][0] = aaReal.x;
+      loop_output[i][1] = aaReal.y;
+      loop_output[i][2] = aaReal.z;
+
+      //Reached end of array
+      if (i == 29) {
+        //Write to file
+        for (int j = 0; j < 30; j++) {
+          myFile.print(loop_output[j][0]);
+          myFile.print("\t");
+          myFile.print(loop_output[j][1]);
+          myFile.print("\t");
+          myFile.print(loop_output[j][2]);
+          myFile.print("\t");
+          
+          if (k == 50) {
+            myFile.print("\t");
+            DateTime now = rtc.now();
+            myFile.print(now.hour(), DEC);
+            myFile.print(':');
+            myFile.print(now.minute(), DEC);
+            myFile.print(':');
+            myFile.println(now.second(), DEC);
+            k = 0;
+          }
+          else {
+            myFile.println();
+          }
+        }
         myFile.flush();
+        i = 0;
+        k++;
       } else {
-        // if the file didn't open, print an error:
-        Serial.println("error opening test.txt");
+        i++;
       }
     #endif
 
