@@ -15,7 +15,7 @@
 #define SD_CS_PIN SS
 SdFat SD;
 File myFile;
-int loop_output[30][3];
+int loop_output[20][6];
 int i = 0;
 int k = 0;
 
@@ -27,16 +27,12 @@ RTC_DS3231 rtc;
 // Accelerometer module
 MPU6050 mpu(0x69);
 
-//#define OUTPUT_READABLE_EULER
-#define OUTPUT_READABLE_REALACCEL
-
 #define INTERRUPT_PIN 2  // use pin 2 on Arduino Uno & most boards
 #define LED_PIN 13 // (Arduino is 13, Teensy is 11, Teensy++ is 6)
 bool blinkState = false;
 
 // MPU control/status vars
 bool dmpReady = false;  // set true if DMP init was successful
-uint8_t mpuIntStatus;   // holds actual interrupt status byte from MPU
 uint8_t devStatus;      // return status after each device operation (0 = success, !0 = error)
 uint16_t packetSize;    // expected DMP packet size (default is 42 bytes)
 uint16_t fifoCount;     // count of all bytes currently in FIFO
@@ -49,6 +45,7 @@ VectorInt16 aaReal;     // [x, y, z]            gravity-free accel sensor measur
 VectorFloat gravity;    // [x, y, z]            gravity vector
 float euler[3];         // [psi, theta, phi]    Euler angle container
 
+volatile bool record = false;
 volatile bool mpuInterrupt = false;     // indicates whether MPU interrupt pin has gone high
 void dmpDataReady() {
   mpuInterrupt = true;
@@ -77,13 +74,13 @@ void setup() {
   Serial.print(F("Initializing SD card..."));
 
   if (!SD.begin(SD_CS_PIN)) {
-    Serial.println("initialization failed!");
+    Serial.println(F("initialization failed!"));
     return;
   }
   Serial.println(F("initialization done."));
 
   // open the file
-  myFile = SD.open("testing.txt", FILE_WRITE);
+  myFile = SD.open("output.txt", FILE_WRITE);
 
   //------------------------------------------------------------------------------
   // Time module
@@ -93,27 +90,9 @@ void setup() {
     while (1) delay(10);
   }
 
-  if (rtc.lostPower()) {
-    Serial.println(F("RTC lost power, let's set the time!"));
-    // When time needs to be set on a new device, or after a power loss, the
-    // following line sets the RTC to the date & time this sketch was compiled
-    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-  }
-
-  // Set the date it was started
+  // output the date it was started
   DateTime now = rtc.now();
-  myFile.print(now.year(), DEC);
-  myFile.print('/');
-  myFile.print(now.month(), DEC);
-  myFile.print('/');
-  myFile.print(now.day(), DEC);
-  myFile.print(" , ");
-  myFile.print(now.hour(), DEC);
-  myFile.print(':');
-  myFile.print(now.minute(), DEC);
-  myFile.print(':');
-  myFile.print(now.second(), DEC);
-  myFile.println();
+  myFile.println(now.timestamp(DateTime::TIMESTAMP_FULL));
   myFile.flush();
   
   //------------------------------------------------------------------------------
@@ -149,11 +128,13 @@ void setup() {
     mpu.setDMPEnabled(true);
 
     // enable Arduino interrupt detection
-    Serial.print(F("Enabling interrupt detection (Arduino external interrupt "));
-    Serial.print(digitalPinToInterrupt(INTERRUPT_PIN));
-    Serial.println(F(")..."));
     attachInterrupt(digitalPinToInterrupt(INTERRUPT_PIN), dmpDataReady, RISING);
-    mpuIntStatus = mpu.getIntStatus();
+
+    //Free Fall interrupt
+    mpu.setIntMotionEnabled(1);
+    mpu.setMotionDetectionThreshold(5);
+    mpu.setMotionDetectionDuration(1);
+    mpu.setDHPFMode(7);
 
     // set our DMP Ready flag so the main loop() function knows it's okay to use it
     Serial.println(F("DMP ready! Waiting for first interrupt..."));
@@ -176,56 +157,60 @@ void loop() {
   if (!dmpReady) return;
   // read a packet from FIFO
   if (mpu.dmpGetCurrentFIFOPacket(fifoBuffer)) { // Get the Latest packet
-    #ifdef OUTPUT_READABLE_EULER
+    if (k == 0) {
+      if (mpu.getIntMotionStatus() == 1) {
+        record = true;
+      }
+    }     
+
+      
+    if(record == true) {
       // display Euler angles in degrees
       mpu.dmpGetQuaternion(&q, fifoBuffer);
       mpu.dmpGetEuler(euler, &q);
-      Serial.print("euler\t");
-      Serial.print(euler[0] * 180/M_PI);
-      Serial.print("\t");
-      Serial.print(euler[1] * 180/M_PI);
-      Serial.print("\t");
-      Serial.print(euler[2] * 180/M_PI);
-      Serial.print("\t");
-    #endif
-
-    #ifdef OUTPUT_READABLE_REALACCEL
+    
       // display real acceleration, adjusted to remove gravity
       mpu.dmpGetQuaternion(&q, fifoBuffer);
       mpu.dmpGetAccel(&aa, fifoBuffer);
       mpu.dmpGetGravity(&gravity, &q);
       mpu.dmpGetLinearAccel(&aaReal, &aa, &gravity);
-//      Serial.print("areal\t");
-//      Serial.print(aaReal.x);
-//      Serial.print("\t");
-//      Serial.print(aaReal.y);
-//      Serial.print("\t");
-//      Serial.println(aaReal.z);
-
+      
       loop_output[i][0] = aaReal.x;
       loop_output[i][1] = aaReal.y;
       loop_output[i][2] = aaReal.z;
-
-      //Reached end of array
-      if (i == 29) {
+      loop_output[i][3] = (euler[0] * 180/M_PI) * 100;
+      loop_output[i][4] = (euler[1] * 180/M_PI) * 100;
+      loop_output[i][5] = (euler[2] * 180/M_PI) * 100;
+     
+      if (i == 19) {
         //Write to file
-        for (int j = 0; j < 30; j++) {
+        k++;
+        for (int j = 0; j < 20; j++) {
           myFile.print(loop_output[j][0]);
-          myFile.print("\t");
+          myFile.print(F("\t"));
           myFile.print(loop_output[j][1]);
-          myFile.print("\t");
+          myFile.print(F("\t"));
           myFile.print(loop_output[j][2]);
-          myFile.print("\t");
+          myFile.print(F("\t"));
+          myFile.print(loop_output[j][3]);
+          myFile.print(F("\t"));
+          myFile.print(loop_output[j][4]);
+          myFile.print(F("\t"));
+          myFile.print(loop_output[j][5]);
           
-          if (k == 50) {
-            myFile.print("\t");
+          if ((k == 50 or k == 1) and j == 0) {
             DateTime now = rtc.now();
-            myFile.print(now.hour(), DEC);
-            myFile.print(':');
-            myFile.print(now.minute(), DEC);
-            myFile.print(':');
-            myFile.println(now.second(), DEC);
-            k = 0;
+            
+            myFile.print(F("\t"));
+            myFile.print(now.timestamp(DateTime::TIMESTAMP_TIME));
+            myFile.print(F("\t"));
+            myFile.print(rtc.getTemperature());
+            myFile.println(F(" C"));
+            
+            if(k == 50) {
+              record = false;
+              k = 0;
+            }
           }
           else {
             myFile.println();
@@ -233,14 +218,13 @@ void loop() {
         }
         myFile.flush();
         i = 0;
-        k++;
       } else {
         i++;
       }
-    #endif
-
-    // blink LED to indicate activity
-    blinkState = !blinkState;
-    digitalWrite(LED_PIN, blinkState);
+      
+      // blink LED to indicate activity
+      blinkState = !blinkState;
+      digitalWrite(LED_PIN, blinkState);
+    }
   }
 }
