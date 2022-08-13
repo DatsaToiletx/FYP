@@ -1,74 +1,70 @@
 /* Used to initialize SD card*/
 #include "SdFat.h"
 #include <SPI.h>
-
-/*Used to initialize time module*/
-#include "RTClib.h"
-
-/*Used to initialize Accelerometer*/
-#include "I2Cdev.h"
-#include "MPU6050_6Axis_MotionApps20.h"
-
-
-//------------------------------------------------------------------------------
-// SD module
 #define SD_CS_PIN SS
 SdFat SD;
 File myFile;
-int loop_output[20][6];
-int i = 0;
-int k = 0;
+//int loop_output[15][6];
+//int i = 0;
+//int k = 0;
 
-//------------------------------------------------------------------------------
-// Time module
+/*Used to initialize time module*/
+#include "RTClib.h"
 RTC_DS3231 rtc;
 
-//------------------------------------------------------------------------------
-// Accelerometer module
-MPU6050 mpu(0x69);
+/*Used to initialize Accelerometer*/
+#include <avr/sleep.h>
 
-#define INTERRUPT_PIN 2  // use pin 2 on Arduino Uno & most boards
-#define LED_PIN 13 // (Arduino is 13, Teensy is 11, Teensy++ is 6)
-bool blinkState = false;
+#include <Wire.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
 
-// MPU control/status vars
-bool dmpReady = false;  // set true if DMP init was successful
-uint8_t devStatus;      // return status after each device operation (0 = success, !0 = error)
-uint16_t packetSize;    // expected DMP packet size (default is 42 bytes)
-uint16_t fifoCount;     // count of all bytes currently in FIFO
-uint8_t fifoBuffer[64]; // FIFO storage buffer
+Adafruit_MPU6050 mpu;
 
-// orientation/motion vars
-Quaternion q;           // [w, x, y, z]         quaternion container
-VectorInt16 aa;         // [x, y, z]            accel sensor measurements
-VectorInt16 aaReal;     // [x, y, z]            gravity-free accel sensor measurements
-VectorFloat gravity;    // [x, y, z]            gravity vector
-float euler[3];         // [psi, theta, phi]    Euler angle container
 
-volatile bool record = false;
-volatile bool mpuInterrupt = false;     // indicates whether MPU interrupt pin has gone high
-void dmpDataReady() {
-  mpuInterrupt = true;
+#define SIGNAL_PATH_RESET 0x68
+#define I2C_SLV0_ADDR 0x37
+#define ACCEL_CONFIG 0x1C
+#define MOT_THR 0x1F // Motion detection threshold bits [7:0]
+#define MOT_DUR 0x20 // Duration counter threshold for motion interrupt generation, 1 kHz rate, LSB = 1 ms
+#define MOT_DETECT_CTRL 0x69
+#define INT_ENABLE 0x38
+#define WHO_AM_I_MPU6050 0x75 // Should return 0x68
+#define INT_STATUS 0x3A
+#define MPU6050_ADDRESS 0x69 // Device address when ADO = 1
+
+int wakePin = 2; // pin used for waking up  
+int led = 13;
+volatile int count = 0;
+
+// Interrupt function
+void wakeUpNow() { 
+  Serial.println("WOKEN UP !!!!!!!!!!");
+  count = 200;
 }
-//------------------------------------------------------------------------------
+
+// Used to configure accelerometer
+void writeByte(uint8_t address, uint8_t subAddress, uint8_t data) {
+  Wire.begin();
+  Wire.beginTransmission(address); // Initialize the Tx buffer
+  Wire.write(subAddress); // Put slave register address in Tx buffer
+  Wire.write(data); // Put data in Tx buffer
+  Wire.endTransmission(); // Send the Tx buffer
+}
+
+uint8_t readByte(uint8_t address, uint8_t subAddress) {
+  uint8_t data; // `data` will store the register data   
+  Wire.beginTransmission(address); // Initialize the Tx buffer
+  Wire.write(subAddress); // Put slave register address in Tx buffer
+  Wire.endTransmission(false); // Send the Tx buffer, but send a restart to keep connection alive
+  Wire.requestFrom(address, (uint8_t) 1); // Read one byte from slave register address 
+  data = Wire.read(); // Fill Rx buffer with result
+  return data; // Return data read from slave register
+}
 
 void setup() {
-  // join I2C bus
-  #if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
-      Wire.begin();
-      Wire.setClock(400000);
-  #elif I2CDEV_IMPLEMENTATION == I2CDEV_BUILTIN_FASTWIRE
-      Fastwire::setup(400, true);
-  #endif
-  
-  Serial.begin(9600);
-  
-  // Wait for USB Serial
-  while (!Serial) {
-    yield();
-  }
-
-  //------------------------------------------------------------------------------
+  Serial.begin(115200);
+  //--------------------------------------------------------------------------------
   // SD module
   // initialize SD card
   Serial.print(F("Initializing SD card..."));
@@ -84,147 +80,129 @@ void setup() {
 
   //------------------------------------------------------------------------------
   // Time module
-  if (! rtc.begin()) {
-    Serial.println(F("Couldn't find RTC"));
-    Serial.flush();
-    while (1) delay(10);
+  rtc.begin();
+
+  if (rtc.lostPower()) {
+    Serial.println(F("RTC lost power, let's set the time!"));
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
   }
 
   // output the date it was started
   DateTime now = rtc.now();
   myFile.println(now.timestamp(DateTime::TIMESTAMP_FULL));
   myFile.flush();
-  
+
   //------------------------------------------------------------------------------
   // Accelerometer module
+  // Initialize mpu
+  mpu.begin();
+  mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
+  mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+  mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
 
-  // initialize device
-  Serial.println(F("Initializing I2C devices..."));
-  mpu.initialize();
-  pinMode(INTERRUPT_PIN, INPUT);
+  // Set setting for mpu
+  writeByte(MPU6050_ADDRESS, 0x6B, 0x00);
+  writeByte(MPU6050_ADDRESS, SIGNAL_PATH_RESET, 0x07); //Reset all internal signal paths in the MPU-6050 by writing 0x07 to register 0x68;
+  writeByte(MPU6050_ADDRESS, I2C_SLV0_ADDR, 0x20); //write register 0x37 to select how to use the interrupt pin. For an active high, push-pull signal that stays until register (decimal) 58 is read, write 0x20.
+  writeByte(MPU6050_ADDRESS, ACCEL_CONFIG, 0x01); //Write register 28 (==0x1C) to set the Digital High Pass Filter, bits 3:0. For example set it to 0x01 for 5Hz. (These 3 bits are grey in the data sheet, but they are used! Leaving them 0 means the filter always outputs 0.)
+  writeByte(MPU6050_ADDRESS, MOT_THR, 5); //Write the desired Motion threshold to register 0x1F (For example, write decimal 20).  
+  writeByte(MPU6050_ADDRESS, MOT_DUR, 10); //Set motion detect duration to 1  ms; LSB is 1 ms @ 1 kHz rate  
+  writeByte(MPU6050_ADDRESS, MOT_DETECT_CTRL, 0x15); //to register 0x69, write the motion detection decrement and a few other settings (for example write 0x15 to set both free-fall and motion decrements to 1 and accelerometer start-up delay to 5ms total by adding 1ms. )   
+  writeByte(MPU6050_ADDRESS, INT_ENABLE, 0x40); //write register 0x38, bit 6 (0x40), to enable motion detection interrupt.     
+  writeByte(MPU6050_ADDRESS, 0x37, 0); // now INT pin is active low
 
-  // verify connection
-  Serial.println(F("Testing device connections..."));
-  Serial.println(mpu.testConnection() ? F("MPU6050 connection successful") : F("MPU6050 connection failed"));
+//  Serial.println(readByte(MPU6050_ADDRESS, 0x6B));
+//  Serial.println(readByte(MPU6050_ADDRESS, 0x68));
+//  Serial.println(readByte(MPU6050_ADDRESS, 0x37));
+//  Serial.println(readByte(MPU6050_ADDRESS, 0x1C));
+//  Serial.println(readByte(MPU6050_ADDRESS, 0x1F));
+//  Serial.println(readByte(MPU6050_ADDRESS, 0x20));
+//  Serial.println(readByte(MPU6050_ADDRESS, 0x69));
+//  Serial.println(readByte(MPU6050_ADDRESS, 0x38));
   
-  // load and configure the DMP
-  Serial.println(F("Initializing DMP..."));
-  devStatus = mpu.dmpInitialize();
+  pinMode(2, INPUT); // sets the digital pin 7 as input
 
-  // supply your own gyro offsets here, scaled for min sensitivity
-  mpu.setXGyroOffset(220);
-  mpu.setYGyroOffset(76);
-  mpu.setZGyroOffset(-85);
-  mpu.setZAccelOffset(1788); // 1688 factory default for my test chip
+  pinMode(wakePin, INPUT_PULLUP); // wakePin is pin no. 2
+  pinMode(led, OUTPUT); //   led is pin no. 13
+  
+  // attachInterrupt(0, wakeUpNow, LOW); // use interrupt 0 (pin 2) and run function wakeUpNow when pin 2 gets LOW
+}
 
-  // make sure it worked (returns 0 if so)
-  if (devStatus == 0) {
-    // Calibration Time: generate offsets and calibrate our MPU6050
-    mpu.CalibrateAccel(6);
-    mpu.CalibrateGyro(6);
-    mpu.PrintActiveOffsets();
-    // turn on the DMP, now that it's ready
-    Serial.println(F("Enabling DMP..."));
-    mpu.setDMPEnabled(true);
+void sleepNow() {
+  set_sleep_mode(SLEEP_MODE_PWR_DOWN); // sleep mode is set here  
+  sleep_enable(); // enables the sleep bit in the mcucr register  
+  delay(500);
+  Serial.println("About to sleep");
+  delay(500);
+  attachInterrupt(digitalPinToInterrupt(2), wakeUpNow, CHANGE); // use interrupt 0 (pin 2) and run function  
+  delay(500);
+  Serial.println("Interupt attached");
+  delay(500);
+  sleep_mode(); // here the device is actually put to sleep...!!
 
-    // enable Arduino interrupt detection
-    attachInterrupt(digitalPinToInterrupt(INTERRUPT_PIN), dmpDataReady, RISING);
+  // THE PROGRAM CONTINUES FROM HERE AFTER INTERRUPT IS CLOSED
+  delay(500);
+  Serial.println("Continuing main program after interupt");
+  delay(500);
 
-    //Free Fall interrupt
-    mpu.setIntMotionEnabled(1);
-    mpu.setMotionDetectionThreshold(5);
-    mpu.setMotionDetectionDuration(1);
-    mpu.setDHPFMode(7);
-
-    // set our DMP Ready flag so the main loop() function knows it's okay to use it
-    Serial.println(F("DMP ready! Waiting for first interrupt..."));
-    dmpReady = true;
-    // get expected DMP packet size for later comparison
-    packetSize = mpu.dmpGetFIFOPacketSize();
-  } else {
-    // ERROR!
-    // 1 = initial memory load failed
-    // 2 = DMP configuration updates failed
-    // (if it's going to break, usually the code will be 1)
-    Serial.print(F("DMP Initialization failed (code "));
-    Serial.print(devStatus);
-    Serial.println(F(")"));
-  }
+  sleep_disable(); // first thing after waking from sleep: disable sl¯eep...  
+  delay(500);
+  Serial.println("Sleep disabled");
+  delay(500);
 }
 
 void loop() {
-  // if programming failed, don't try to do anything
-  if (!dmpReady) return;
-  // read a packet from FIFO
-  if (mpu.dmpGetCurrentFIFOPacket(fifoBuffer)) { // Get the Latest packet
-    if (k == 0) {
-      if (mpu.getIntMotionStatus() == 1) {
-        record = true;
-      }
-    }     
-
-      
-    if(record == true) {
-      // display Euler angles in degrees
-      mpu.dmpGetQuaternion(&q, fifoBuffer);
-      mpu.dmpGetEuler(euler, &q);
+  if (count != 0) {
+    sensors_event_t a, g, temp;
+    mpu.getEvent(&a, &g, &temp);
+  
+    /* Print out the values */
+    Serial.print(count);
+    Serial.print("\t");
+    Serial.print(a.acceleration.x);
+    Serial.print("\t");
+    Serial.print(a.acceleration.y);
+    Serial.print("\t");
+    Serial.print(a.acceleration.z);
+    Serial.print("\t");
+  
+    Serial.print(g.gyro.x);
+    Serial.print("\t");
+    Serial.print(g.gyro.y);
+    Serial.print("\t");
+    Serial.print(g.gyro.z);
+    Serial.print("\t");
     
-      // display real acceleration, adjusted to remove gravity
-      mpu.dmpGetQuaternion(&q, fifoBuffer);
-      mpu.dmpGetAccel(&aa, fifoBuffer);
-      mpu.dmpGetGravity(&gravity, &q);
-      mpu.dmpGetLinearAccel(&aaReal, &aa, &gravity);
+    Serial.print(temp.temperature);
+    Serial.println(" degC");
+
+    myFile.print("\t");
+    myFile.print(a.acceleration.x);
+    myFile.print("\t");
+    myFile.print(a.acceleration.y);
+    myFile.print("\t");
+    myFile.print(a.acceleration.z);
+    myFile.print("\t");
+    myFile.print(g.gyro.x);
+    myFile.print("\t");
+    myFile.print(g.gyro.y);
+    myFile.print("\t");
+    myFile.print(g.gyro.z);
+
+    if (count == 200 || count == 1) {
+      DateTime now = rtc.now();
       
-      loop_output[i][0] = aaReal.x;
-      loop_output[i][1] = aaReal.y;
-      loop_output[i][2] = aaReal.z;
-      loop_output[i][3] = (euler[0] * 180/M_PI) * 100;
-      loop_output[i][4] = (euler[1] * 180/M_PI) * 100;
-      loop_output[i][5] = (euler[2] * 180/M_PI) * 100;
-     
-      if (i == 19) {
-        //Write to file
-        k++;
-        for (int j = 0; j < 20; j++) {
-          myFile.print(loop_output[j][0]);
-          myFile.print(F("\t"));
-          myFile.print(loop_output[j][1]);
-          myFile.print(F("\t"));
-          myFile.print(loop_output[j][2]);
-          myFile.print(F("\t"));
-          myFile.print(loop_output[j][3]);
-          myFile.print(F("\t"));
-          myFile.print(loop_output[j][4]);
-          myFile.print(F("\t"));
-          myFile.print(loop_output[j][5]);
-          
-          if ((k == 50 or k == 1) and j == 0) {
-            DateTime now = rtc.now();
-            
-            myFile.print(F("\t"));
-            myFile.print(now.timestamp(DateTime::TIMESTAMP_TIME));
-            myFile.print(F("\t"));
-            myFile.print(rtc.getTemperature());
-            myFile.println(F(" C"));
-            
-            if(k == 50) {
-              record = false;
-              k = 0;
-            }
-          }
-          else {
-            myFile.println();
-          }
-        }
-        myFile.flush();
-        i = 0;
-      } else {
-        i++;
-      }
-      
-      // blink LED to indicate activity
-      blinkState = !blinkState;
-      digitalWrite(LED_PIN, blinkState);
+      myFile.print(F("\t"));
+      myFile.print(now.timestamp(DateTime::TIMESTAMP_TIME));
+      myFile.print("\t");
+      myFile.print(temp.temperature);
+      myFile.print(" degC");
     }
-  }
+    
+    myFile.println();
+    myFile.flush();
+    count--;
+  } else {
+    sleepNow(); // sleep function called here 
+  }  
 }
